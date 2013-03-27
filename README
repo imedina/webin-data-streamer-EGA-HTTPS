@@ -1,0 +1,24 @@
+webin-data-streamer-EGA-HTTPS
+=============================
+
+This is the EGA (European Genome Phenome Archive) HTTP server; it is implemented as HTTPS service that requires SSL secured connections. This server allows remote access to BAM files in the EGA archive. The code to access the HTTP server is part of the project webin-data-streamer-Cipher.
+
+Version 0.8
+
+To build the program from source:
+ 
+To check out the source code from github you will need git client: http://git-scm.com/
+Make sure you have java 1.6 or higher: http://openjdk.java.net/ or http://www.oracle.com/us/technologies/java/index.html
+Make sure you have ant version 1.8 or higher: http://ant.apache.org/
+
+git clone git://github.com/enasequence/webin-data-streamer-Cipher.git
+
+Working directory: webin-data-streamer-HTTPS/
+
+ant build package-for-store
+
+Single-Jar result will be produced in  the store/ directory.
+
+To run unit tests:
+
+ant test
