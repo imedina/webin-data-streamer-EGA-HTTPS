@@ -21,7 +21,6 @@
 
 package uk.ac.ebi.ega.securehttps;
 
-import com.mchange.v2.c3p0.ComboPooledDataSource;
 import java.io.BufferedReader;
 import java.io.DataOutputStream;
 import java.io.File;
@@ -41,13 +40,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 
-import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
-
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.StringTokenizer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -66,7 +59,8 @@ import net.sf.samtools.seekablestream.SeekableStream;
 import org.apache.commons.io.IOUtils;
 import uk.ac.ebi.ega.cipher.Glue;
 import uk.ac.ebi.ega.cipher.SeekableCipherStream_256;
-
+import uk.ac.ebi.embl.ena.fileaccess.ena_db_file_ext_thread;
+import uk.ac.ebi.embl.ena.fileaccess.file_data;
 
 /**
  *
@@ -88,55 +82,20 @@ import uk.ac.ebi.ega.cipher.SeekableCipherStream_256;
  */
 public class HttpsHandler_Alternative extends Thread {
     // Should be the same across multiple threads - it's the port defined at startup
-    private Socket connectionsocket;
-    private boolean verbose; // DEBUG ONLY
+    private final Socket connectionsocket;
+    private final boolean verbose; // DEBUG ONLY
     private static LiveData inter_thread_store;
-    private Connection conn, pw_conn;
-    private ComboPooledDataSource cpds, pwds;
-    private String ut, ft, pt;
     
-    private HttpsServ server;
+    private final HttpsServ server;
+    
+    private String user_id;
 
     // Constructor - receive an active socket connection once a request has been made
-    public HttpsHandler_Alternative(Socket connectionsocket, boolean verbose, LiveData inter_thread_store, Connection conn, Connection pw_conn, String ut_, String ft_, String pt_) {
+    public HttpsHandler_Alternative(Socket connectionsocket, boolean verbose, LiveData inter_thread_store, HttpsServ serv) {
         this.connectionsocket = connectionsocket; // accepted connection
         this.verbose = verbose;
         HttpsHandler_Alternative.inter_thread_store = inter_thread_store; // authentication information
-        this.conn = conn; // database connection
-        this.pw_conn = pw_conn; // database connection
-        this.cpds = null;
-        this.pwds = null;
-        this.ut = ut_;
-        this.ft = ft_;
-        this.pt = pt_;
-    }
-
-    // Constructor - receive an active socket connection once a request has been made
-    public HttpsHandler_Alternative(Socket connectionsocket, boolean verbose, LiveData inter_thread_store, ComboPooledDataSource cpds, ComboPooledDataSource pwds, String ut_, String ft_, String pt_) {
-        this.connectionsocket = connectionsocket; // accepted connection
-        this.verbose = verbose;
-        HttpsHandler_Alternative.inter_thread_store = inter_thread_store; // authentication information
-        this.conn = null;
-        this.pw_conn = null;
-        this.cpds = cpds; // database connection
-        this.pwds = pwds;
-        this.ut = ut_;
-        this.ft = ft_;
-        this.pt = pt_;
-    }
-    
-    public HttpsHandler_Alternative(Socket connectionsocket, boolean verbose, LiveData inter_thread_store, HttpsServ server, String ut_, String ft_, String pt_) {
-        this.connectionsocket = connectionsocket; // accepted connection
-        this.verbose = verbose;
-        HttpsHandler_Alternative.inter_thread_store = inter_thread_store; // authentication information
-        this.conn = null;
-        this.pw_conn = null;
-        this.cpds = null;
-        this.pwds = null;
-        this.server = server;
-        this.ut = ut_;
-        this.ft = ft_;
-        this.pt = pt_;
+        this.server = serv;
     }
 
     //this is a overridden method from the Thread class we extended from
@@ -169,7 +128,7 @@ public class HttpsHandler_Alternative extends Thread {
                 get_request(in, host, st); // request file (portion of..; BAM or BAI file)
 
             } else { // Invalid Request
-                // If neither GET nor POST were sent, this server will not respond.
+                // If neither GET, POST, LIST, or LDS were sent, this server will not respond.
                 // Options include logging, doing nothing, sending error messages
                 if (this.verbose) {
                     System.out.println("ILLEGAL REQUEST");
@@ -201,94 +160,27 @@ public class HttpsHandler_Alternative extends Thread {
         }
     }
 
-
-
-
     // *************************************************************************
     // Perform user authentication: connect to database and query user name
     private ArrayList dataValidation(String username, String pw) {
-        ArrayList result = null;
-        boolean disconnect = false;
+        ArrayList result = new ArrayList();
 
-        try {
-            this.conn = this.server.getAConn();
-            this.pw_conn = this.server.getAPWConn();
-            disconnect = true;
-            
-            // Request credentials -- compare user password with its hash in the database
-            boolean success = false;
-            String query = this.ut + "='"+username+"'";
-            //String query = "SELECT "+this.ut[1]+", "+this.ut[3]+" FROM "+this.ut[0]+" WHERE "+this.ut[2]+"='"+username+"'";
-            Statement st = conn.createStatement();
-            ResultSet rs = st.executeQuery(query);
-            String user_id = null;
-            while (rs.next())
-            {
-                String s = rs.getString(1), t = pw; // password
-                String u = rs.getString(2); // user_id
-                if (s.equals(t)) {
-                    success = true;
-                    user_id = u;
-                    continue;
-                }
-            }
-
-            if (success) {
-                result = new ArrayList();
-                username = user_id; //"1";
-                query = this.ft + "='"+username+"'";
-                st = conn.createStatement();
-                rs = st.executeQuery(query);
-                while (rs.next())
-                {
-                    String s = rs.getString(1).trim(); // file_name
-                    String r = rs.getString(2).trim(); //s + ".bai"; // index_name
-                    File r_f = new File(r);
-                    if (!r_f.exists()) continue; // Skip files without index
-                    String q = get_pass_for_file(s);
-                    
-                    result.add(s);
-                    result.add(r);
-                    result.add(q);
-                }
-            }            
-
-        } catch (SQLException ex) {
-            Logger.getLogger(HttpsHandler_Alternative.class.getName()).log(Level.SEVERE, null, ex);
-        }
-
-        if (disconnect) {
-            try {
-                this.conn.close();
-                this.conn = null;
-            } catch (SQLException ex) {
-                Logger.getLogger(HttpsHandler_Alternative.class.getName()).log(Level.SEVERE, null, ex);
-            }
-        }
+        String user_id = this.server.getCache().checkLoginCachedDrupal(username, pw);
+        result.add(user_id);
+        
+        if (user_id != null && !user_id.isEmpty()) {
+            this.user_id = user_id;
+        }        
         
         return result;
     }
-        private String get_pass_for_file(String filename) {
-                String pw = "";
-                try {
-                        Connection conn = this.server.getAPWConn();
-                        
-                        String query = this.pt;
-                        Statement st = conn.createStatement();
-                        ResultSet rs = st.executeQuery(query);
-                        
-                        while (rs.next()) {
-                                pw = rs.getString(1);
-                                break;
-                        }
-                        
-                        conn.close();
-                } catch (SQLException ex) {
-                        java.util.logging.Logger.getLogger(HttpsHandler_Alternative.class.getName()).log(Level.SEVERE, null, ex);
-                }
+    private String get_pass_for_file(String filename) {
+        String pw = "";
 
-                return pw;
-        }
+        pw = this.server.getCache().get_pass_for_file(filename);
+
+        return pw;
+    }
 
 
 
@@ -299,7 +191,9 @@ public class HttpsHandler_Alternative extends Thread {
     // *************************************************************************
     // Perform user authentication request (branch of if statement)
     private void post_request(BufferedReader in, String host) throws IOException, NoSuchAlgorithmException, NoSuchPaddingException, InvalidKeyException, InvalidAlgorithmParameterException, IllegalBlockSizeException, BadPaddingException {
-        GZIPOutputStream out__ = new GZIPOutputStream(connectionsocket.getOutputStream());
+        //GZIPOutputStream out__ = new GZIPOutputStream(connectionsocket.getOutputStream());
+        OutputStream out__ = connectionsocket.getOutputStream();
+
         String line1 = null;
 
         // This branch answers to POST connection requests - it expects a username/password
@@ -323,49 +217,20 @@ public class HttpsHandler_Alternative extends Thread {
             
             // Access Database - Validate User Credentials
             ArrayList valResult = dataValidation(username, pw), userResponse = null;
-            HashMap user_files = null;
-            if (valResult != null) { // if a list is returned, validation was successful
-                // For now: Put it in the LiveData structure
-                user_files = new HashMap();
-                userResponse = new ArrayList();
-                for (int i=0; i<valResult.size(); i+=3) {
-                    String bam_url = valResult.get(i).toString();
-                    if (!bam_url.toLowerCase().endsWith(".gpg")) {
-                        String bai_url = valResult.get(i+1).toString();
-                        String pass = valResult.get(i+2).toString();
-                        String filename = bam_url.substring(bam_url.lastIndexOf("/")+1);
-
-                        BAM_Entry x = new BAM_Entry(); // User's BAM files
-                        x.BAM_url = bam_url;
-                        x.BAI_url = bai_url;
-                        x.pass = pass;
-                        user_files.put(filename, x); // Session Storage
-                        userResponse.add(filename);
-                    }
-                }
-
-            } else { // validation not successful, or no files returned
-                in.close();
-                //out__.close();
-                return;
-            }
 
             // Send Server Response back to client
             SecureRandom sr = SecureRandom.getInstance("SHA1PRNG");
             String session_token = String.valueOf(sr.nextGaussian()+"X"+sr.nextDouble()+"X"+sr.nextGaussian()+".bam"); // For SAMFileReader Interaction
-            StringBuilder sb = new StringBuilder(); // TODO: potentially... proper header
+            StringBuilder sb = new StringBuilder(); // TODO: potentially... proper header Pfft. Java 7_45 requires it!
+            sb.append("HTTP/1.0 200 OK").append("\n").append("\n");
+out__.write(sb.toString().getBytes());
+//out__.flush();
+out__ = new GZIPOutputStream(out__);
+sb = new StringBuilder();
             sb.append("Authentication_Success").append(" ").append(session_token).append(" \n").append("\n");
-//System.out.println("Pre: " + sb.toString()); // Return value with session token; not with list of files!
 
-            // This list may be very large; selectable whether o not to reply!
-            // For now: Simply list all file names to the user
-            if (e == null) {
-                for (int i=0; i<userResponse.size(); i++)
-                    sb.append(userResponse.get(i).toString()).append("\n");
-            }
-//System.out.println("Pre: " + sb.toString()); // Return value with session token; not with list of files!
             out__.write(sb.toString().getBytes());
-            out__.finish(); // complete the zlib stream
+((GZIPOutputStream)out__).finish(); // complete the zlib stream
             out__.flush();
 
             // Update persistent storage -------------------------------
@@ -383,7 +248,10 @@ public class HttpsHandler_Alternative extends Thread {
             skey = null; ivSpec = null;
             new_session.user_password = new_session.encipher.doFinal(password); // encrypted user password
             for (int i=0; i<password.length; password[i++] = 0); // Wipe password
-            new_session.user_files = user_files; // All user's files and locations
+            // No longer store user's files in the session store - use mem cache for that
+            //new_session.user_files = user_files; // All user's files and locations
+            new_session.username = this.user_id;
+//System.out.println("Storing -- " + new_session.username + "  " + this.user_id);
 
             HttpsHandler_Alternative.inter_thread_store.put(session_token+host, new_session); // store session context by session token
         }
@@ -408,6 +276,13 @@ public class HttpsHandler_Alternative extends Thread {
 
         // ---- validate ongoing session --------------------------------------- start
         String filerequest = st.nextToken().substring(1);
+        if (filerequest.endsWith("LDS")) {
+            lds_request(in, host, st);
+            return;
+        } else if (filerequest.endsWith("LIST")) {
+            list_request(in, host, st);
+            return;
+        }
         String session_token = st.nextToken();
         boolean index = filerequest.toUpperCase().contains(".BAM.BAI");
 
@@ -446,7 +321,7 @@ public class HttpsHandler_Alternative extends Thread {
                 // TODO: Cipher for BAM, Plain for BAI
                 SeekableStream the_stream = null;
                 if (!index)
-                    the_stream = this_session.the_stream; // Encryptes BAM file Stream
+                    the_stream = this_session.the_stream; // Encrypted BAM file Stream
                 else
                     the_stream = this_session.the_index_stream; // Plain Index Stream
                 //SeekableCipherStream_256 stream = this_session.the_stream;
@@ -459,6 +334,7 @@ public class HttpsHandler_Alternative extends Thread {
                 //stream.seek(offset);
                 //stream.read(read_bytes); // Execute user query on local and private BAM file
                 OutputStream out = connectionsocket.getOutputStream();
+                out.write("HTTP/1.0 200 OK\n\n".getBytes()); // Java 7 header; after that, unchanged
                 DataOutputStream dos = new DataOutputStream(out);
                 int len = read_bytes.length;
                 dos.writeInt(len); // Send length of sent data first, to enable easier read
@@ -519,7 +395,10 @@ System.out.println(" --> TODO: MUST IMPLEMENT THIS SECTION FULLY");
                     this_session.the_index_stream = y1; // BAI stream
                 }
                 StringBuilder buf = new StringBuilder();
-                buf.append("Content-Length: ").append(y1.length()).append("\n"); // length of the actual file opened
+//                buf.append("HTTP/1.0 200 OK").append("\n").append("\n");
+//                buf.append("Content-Length: ").append(y1.length()).append("\n"); // length of the actual file opened
+                buf.append("HTTP/1.0 200 OK").append("\n");
+                buf.append("Content-Length: ").append(y1.length()).append("\n").append("\n"); // length of the actual file opened
                 //y1.close();
 
                 // Send content length back to user's browser
@@ -538,6 +417,146 @@ System.out.println(" --> TODO: MUST IMPLEMENT THIS SECTION FULLY");
         }
     }
 
+    // *****************************************************************
+    // ** List handling branch
+    // *****************************************************************
+    // *************************************************************************
+    // e.g. LIST _sessiontoken_ [dataset id]
+    // List useable, authorized files for authenticated users (used to be part of
+    // connection procedure, but no longer due to size/time concerns)
+    private void list_request(BufferedReader in, String host, StringTokenizer st) throws IOException {
+System.out.println("List Request");
+//        GZIPOutputStream out__ = new GZIPOutputStream(connectionsocket.getOutputStream());
+        OutputStream out_ = connectionsocket.getOutputStream();
+        
+        // ---- validate ongoing session --------------------------------------- start
+        String session_token = st.nextToken();
+
+        LiveStruct this_session = null;
+        if (!session_token.contains("HTTP")) {
+            String key = session_token + host;
+            if (this.verbose) System.out.println("SESSIONTOKEN_HOST--> " + session_token + host); // DEBUG
+
+            if (HttpsHandler_Alternative.inter_thread_store.containsKey(key)) { // Existing valid session
+                if (this.verbose) System.out.println("SESSIONTOKEN_HOST--> "+key+" CONTAINED IN HASH! AUTHENTICATION SUCCESS"); // DEBUG
+                this_session = HttpsHandler_Alternative.inter_thread_store.get(key);
+                if (this_session == null)
+                    return;
+            } else { // Session key has not been established, or something else went wrong!
+                return;
+            }
+        // ---- validate ongoing session --------------------------------------- end            
+        } else {
+            return;
+        }
+
+        // ** Handle request here **
+        // First, get a list of all applicable files ---------------------------
+        String dataset = null;
+        if (st.hasMoreTokens())
+            dataset = st.nextToken();
+        if (dataset.contains("HTTP"))
+            dataset = null;
+System.out.println("For: " + this_session.username + " " + dataset);
+        
+        file_data[] list = (dataset==null)?
+                this.server.getCache().list(this_session.username):
+                this.server.getCache().list(this_session.username, dataset, ena_db_file_ext_thread.id_type.Dataset);
+        ArrayList valResult = new ArrayList(); // filename, index_name, password            
+        if (list != null) {
+            for (int i=0; i<list.length; i++) {
+//System.out.println(list[i].file_name.toLowerCase());
+                if (list[i].file_name.toLowerCase().endsWith(".bam.cip") ||
+                    list[i].file_name.toLowerCase().endsWith(".bam")) {
+                    valResult.add(list[i].file_name);
+                    valResult.add(list[i].index_name);
+                    valResult.add(list[i].enc_pw);
+                }
+            }
+        }
+        
+        // Second, respond by sending that list --------------------------------
+        ArrayList userResponse = new ArrayList();
+        for (int i=0; i<valResult.size(); i+=3) { // Artefact of previous code usage
+            String bam_url = valResult.get(i).toString();
+            if (!bam_url.toLowerCase().endsWith(".gpg")) { // no longer required
+                String bai_url = valResult.get(i+1).toString();
+                String pass = valResult.get(i+2).toString();
+                String filename = bam_url.substring(bam_url.lastIndexOf("/")+1);
+                userResponse.add(filename);
+            }
+        }
+
+        // Build response to user query, and send it
+        StringBuilder sb = new StringBuilder();
+        sb.append("HTTP/1.0 200 OK").append("\n").append("\n");
+out_.write(sb.toString().getBytes());
+out_ = new GZIPOutputStream(out_);
+sb = new StringBuilder();
+        for (int i=0; i<userResponse.size(); i++)
+            sb.append(userResponse.get(i).toString()).append("\n");
+        out_.write(sb.toString().getBytes());
+((GZIPOutputStream)out_).finish(); // complete the zlib stream
+        out_.flush();
+
+        // Close connections -- Authentication etablished and context in memory
+        out_.close();
+    }
+    
+    // *****************************************************************
+    // ** List handling branch
+    // *****************************************************************
+    // *************************************************************************
+    // e.g. LIST _sessiontoken_ [dataset id]
+    // List useable, authorized files for authenticated users (used to be part of
+    // connection procedure, but no longer due to size/time concerns)
+    private void lds_request(BufferedReader in, String host, StringTokenizer st) throws IOException {
+        //GZIPOutputStream out__ = new GZIPOutputStream(connectionsocket.getOutputStream());
+        OutputStream out_ = connectionsocket.getOutputStream();
+        
+        // ---- validate ongoing session --------------------------------------- start
+        String session_token = st.nextToken();
+
+        LiveStruct this_session = null;
+        if (!session_token.contains("HTTP")) {
+            String key = session_token + host;
+            if (this.verbose) System.out.println("SESSIONTOKEN_HOST--> " + session_token + host); // DEBUG
+
+            if (HttpsHandler_Alternative.inter_thread_store.containsKey(key)) { // Existing valid session
+                if (this.verbose) System.out.println("SESSIONTOKEN_HOST--> "+key+" CONTAINED IN HASH! AUTHENTICATION SUCCESS"); // DEBUG
+                this_session = HttpsHandler_Alternative.inter_thread_store.get(key);
+                if (this_session == null)
+                    return;
+            } else { // Session key has not been established, or something else went wrong!
+                return;
+            }
+        // ---- validate ongoing session --------------------------------------- end            
+        } else {
+            return;
+        }
+        // ** Handle request here **
+        // First, get a list of all applicable files ---------------------------
+        System.out.println("Getting for ID: " + this_session.username + "  " + this.user_id);
+        String[] iDs = this.server.getCache().getIDs(this_session.username, "", ena_db_file_ext_thread.id_type.Dataset);
+        
+        // Second, respond by sending that list --------------------------------
+        // Build response to user query, and send it
+        StringBuilder sb = new StringBuilder();
+//out_ = new GZIPOutputStream(out_);
+        sb.append("HTTP/1.0 200 OK").append("\n").append("\n");
+out_.write(sb.toString().getBytes());
+out_ = new GZIPOutputStream(out_);
+sb = new StringBuilder();
+        for (int i=0; i<iDs.length; i++)
+            sb.append(iDs[i]).append("\n");
+        out_.write(sb.toString().getBytes());
+((GZIPOutputStream)out_).finish(); // complete the zlib stream
+        out_.flush();
+
+        // Close connections -- Authentication etablished and context in memory
+        out_.close();
+    }
+    
     // Helper funcrtions -------------------------------------------------------
 
     private String getString(byte[] input) {

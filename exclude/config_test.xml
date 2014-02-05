@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Database>
+    <ServerPort>8443</ServerPort>
+    <DBPath>jdbc:mysql://pg-mysql-vault-ega-dev-1</DBPath>
+	<PWDBPath>jdbc:mysql://pg-mysql-vault-ega-dev-1</PWDBPath>
+    <UserSQL>SELECT password, stable_id FROM account WHERE email</UserSQL>
+    <FileSQL>SELECT file_name, index_name, size FROM	account_permissions, file WHERE	account_permissions.dataset_stable_id=file.dataset_stable_id and account_permissions.account_stable_id</FileSQL>
+	<PwSQL>SELECT encryption_key FROM	encryption_key</PwSQL>
+</Database>

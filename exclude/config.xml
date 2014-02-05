@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Database>
+    <ServerPort>8443</ServerPort>
+    <DBPath>jdbc:mysql://pg-mysql-vault-ega-dev-1</DBPath>
+    <PWDBPath>jdbc:mysql://pg-mysql-vault-ega-prod</PWDBPath>
+    <DRDBPath>jdbc:mysql://pg-mysql-vault-ega-drupal</DRDBPath>
+</Database>

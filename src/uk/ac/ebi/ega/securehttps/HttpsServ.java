@@ -22,6 +22,7 @@
 package uk.ac.ebi.ega.securehttps;
 
 import java.beans.PropertyVetoException;
+import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -48,11 +49,10 @@ import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLServerSocketFactory;
 
-import java.io.Console;
+import java.io.File;
+import java.io.FileReader;
 import java.io.InputStream;
 import java.security.InvalidParameterException;
-import java.sql.Connection;
-import java.sql.SQLException;
 import java.util.Properties;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -62,10 +62,9 @@ import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
 import uk.ac.ebi.ega.cipher.Glue;
-import uk.ac.ebi.embl.ena.dbcomponents.EnaDBComponents;
-import uk.ac.ebi.embl.ena.dbcomponents.EnaDBComponents.type;
 import uk.ac.ebi.embl.ena.dbcomponents.StringEncrypter;
 import uk.ac.ebi.embl.ena.dbcomponents.StringEncrypter.EncryptionException;
+import uk.ac.ebi.embl.ena.infinicache.memCache;
 
 /**
  *
@@ -84,66 +83,78 @@ import uk.ac.ebi.embl.ena.dbcomponents.StringEncrypter.EncryptionException;
  *
  */
 public class HttpsServ implements Runnable {
-    private int listening_port;
-    private boolean verbose; // DEBUG
-    private LiveData inter_thread_store;
-    private ExecutorService threadPool;
+    private final int listening_port;
+    private final boolean verbose; // DEBUG
+    private final LiveData inter_thread_store;
+    private final ExecutorService threadPool;
     private Cipher runtime_encipher, runtime_decipher;
-    private EnaDBComponents cpd, pwd;
     
-    private String ut, ft, pt; // database table names
-
+    private final memCache the_cache;
+    
     /**
      * @param args the command line arguments
      *              Port - port number for HTTPS requests (defaults to 4..)
      *              Port - port number for FTP(S) requests (defaults to 4..)
+     * @throws java.beans.PropertyVetoException
      */
     public static void main(String[] args) throws PropertyVetoException {
+        System.setProperty("java.net.preferIPv4Stack" , "true");
         String USAGE = "USAGE: java Server [CONFIG_FILE] [optional: password]\n";
 
-        if (args.length != 2 && args.length != 1 && args.length != 5) {
+        String version = "0.0", key = "";
+
+        String versionfile = "clientversion.txt"; // latest version of the client
+        File vf = new File(versionfile);
+        try {
+            BufferedReader br = new BufferedReader(new FileReader(vf));
+            version = br.readLine();
+            br.close();
+        } catch(Throwable t) {
+            ; // If no version file exists, don't use the feature
+        }
+        String keyfile = "start.key"; // key for properties
+        File kf = new File(keyfile);
+        try {
+            BufferedReader br = new BufferedReader(new FileReader(kf));
+            key = br.readLine();
+            br.close();
+        } catch(Throwable t) {
+            if (args.length >= 2)
+                key = args[1];
+        }
+                
+        if (args.length != 2 && args.length != 1) {
                 System.err.print( USAGE );
                 throw new InvalidParameterException();                    
         }
 
-        String db_username = "", db_password = "", db_port = "", db = "";
-        String pw_db_username = "", pw_db_password = "", pw_db_port = "", pw_db = "";
+        String  db_username = "", db_password = "", server_port = "", 
+                db_path = "", db = "", db_hash = "", db_port = "", 
+                pw_db_path = "", pw_db = "", pw_db_port = "";
         boolean test = false;
-        if (args.length == 2) { 
+        if (args.length == 1) { 
             String resource = "/prop.properties";
             if (args[0].contains("config_test")) {
                 test = true;
                 resource = "/prop_test.properties";
             }
-            
+
             try {
                 Properties properties = new Properties();
-                //InputStream in = HttpsServ.class.getResourceAsStream("/prop.properties");
+                //InputStream in = Server.class.getResourceAsStream("/prop.properties");
                 InputStream in = HttpsServ.class.getResourceAsStream(resource);
                 properties.load(in);
-                
-                String db_ = properties.getProperty("database").toString();
+
                 String un_ = properties.getProperty("username").toString();
                 String pw_ = properties.getProperty("password").toString();
-                String pt_ = properties.getProperty("port").toString();
-
-                String pw_db_ = properties.getProperty("pw_database").toString();
-                String pw_un_ = properties.getProperty("pw_username").toString();
-                String pw_pw_ = properties.getProperty("pw_password").toString();
-                String pw_pt_ = properties.getProperty("pw_port").toString();
 
                 StringEncrypter encrypter = null;
                 try {
-                    encrypter = new StringEncrypter( StringEncrypter.DESEDE_ENCRYPTION_SCHEME, args[1] );
-                    db = encrypter.decrypt(db_);
+                    //encrypter = new StringEncrypter( StringEncrypter.DESEDE_ENCRYPTION_SCHEME, args[1] );
+                    encrypter = new StringEncrypter( StringEncrypter.DESEDE_ENCRYPTION_SCHEME, key );
+
                     db_username = encrypter.decrypt(un_);
                     db_password = encrypter.decrypt(pw_);
-                    db_port = encrypter.decrypt(pt_);
-                    
-                    pw_db = encrypter.decrypt(pw_db_);
-                    pw_db_username = encrypter.decrypt(pw_un_);
-                    pw_db_password = encrypter.decrypt(pw_pw_);
-                    pw_db_port = encrypter.decrypt(pw_pt_);
 
                 } catch (EncryptionException ex) {
                     java.util.logging.Logger.getLogger(HttpsServ.class.getName()).log(Level.SEVERE, null, ex);
@@ -153,38 +164,13 @@ public class HttpsServ implements Runnable {
             }
         }
         
-        if (args.length == 1) {
-            Console c = System.console();
-            db = c.readLine("Enter DB: ");
-            db_username = c.readLine("Enter DB Username: ");
-            db_password = c.readLine("Enter DB Password: ");
-            db_port = c.readLine("Enter DB Port: ");                    
-            
-            pw_db = c.readLine("Enter PW DB: ");
-            pw_db_username = c.readLine("Enter PW DB Username: ");
-            pw_db_password = c.readLine("Enter PW DB Password: ");
-            pw_db_port = c.readLine("Enter PW DB Port: ");                    
-        } else if (args.length == 5) {
-            db = args[1];
-            db_username = args[2];
-            db_password = args[3];
-            db_port = args[4];
-            
-            pw_db = args[5];
-            pw_db_username = args[6];
-            pw_db_password = args[7];
-            pw_db_port = args[8];
-        }
-        
         // Get port numbers; if args missing, use default values (80 HTTP, 443 HTTPS)
         int https_port = 8443; // (989 FTPS Data, 990 FTPS Control; 20 FTP Data, 21 FTP Control)
         boolean verbose = true;
 
         // New addition: Read config file information
         DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
-
-        //Using factory get an instance of document builder
-        String  server_port = "", db_path = "", pw_db_path = "", ut_query = "", ft_query = "", flush = "", pw_query = "";
+        
         DocumentBuilder dbb = null;
         try {
             dbb = dbf.newDocumentBuilder();
@@ -192,6 +178,9 @@ public class HttpsServ implements Runnable {
             Document dom = dbb.parse(args[0]); // name of the config file
             dom.getDocumentElement().normalize();
 
+            //String  server_port = "", db_path = "", pw_db_path = "", ut_query = "", ft_query = "", flush = "", pw_query = "";
+            String log_file = "";
+            int bs = 0;
             NodeList nList = dom.getElementsByTagName("Database");
             for (int temp = 0; temp < nList.getLength(); temp++) {
 
@@ -201,15 +190,31 @@ public class HttpsServ implements Runnable {
                   Element eElement = (Element) nNode;                          
                   server_port = getTagValue("ServerPort",eElement);
                   if (server_port.matches("[0-9]+")) https_port = Integer.parseInt(server_port); // actually use specified port
-                  db_path = getTagValue("DBPath",eElement);
-                  pw_db_path = getTagValue("PWDBPath",eElement);
-                  ut_query = getTagValue("UserSQL",eElement);
-                  ft_query = getTagValue("FileSQL",eElement);                          
-                  pw_query = getTagValue("PwSQL", eElement);
-               }
 
-               System.out.println("Config Read.");
+                  db_path = getTagValue("DBPath",eElement);
+                  db = getTagValue("DB",eElement);
+                  db_hash = getTagValue("DBH",eElement);
+                  db_port = getTagValue("DBPort",eElement);
+
+                  pw_db_path = getTagValue("PWDBPath",eElement);
+                  pw_db = getTagValue("PWDB",eElement);
+                  pw_db_port = getTagValue("PWDBPort",eElement);
+               }
             }
+            nList = dom.getElementsByTagName("Transfer");
+            for (int temp = 0; temp < nList.getLength(); temp++) {
+
+               Node nNode = nList.item(temp);	    
+               if (nNode.getNodeType() == Node.ELEMENT_NODE) {
+
+                  Element eElement = (Element) nNode;                          
+                    try {
+                      log_file = getTagValue("LogFileName",eElement);
+                    } catch (NullPointerException ex) {log_file=null;} // in case this line is missing
+                }                       
+            }
+
+            System.out.println("Config Read.");
         } catch (ParserConfigurationException ex) {
             java.util.logging.Logger.getLogger(HttpsServ.class.getName()).log(Level.SEVERE, null, ex);
         } catch( Exception e ) {
@@ -230,17 +235,20 @@ public class HttpsServ implements Runnable {
                                     verbose, 
                                     db_path, 
                                     pw_db_path, 
+                                    db_path, 
                                     db_username, 
-                                    pw_db_username, 
+                                    db_username, 
+                                    db_username, 
                                     db_password, 
-                                    pw_db_password, 
+                                    db_password, 
+                                    db_password, 
                                     db_port, 
                                     pw_db_port, 
-                                    ut_query, 
-                                    ft_query, 
-                                    pw_query,
+                                    db_port, 
                                     db,
-                                    pw_db);
+                                    pw_db,
+                                    db_hash,
+                                    key);
         //web_server.start();
         new Thread( web_server ).start();
         System.out.println("HTTPS Server started on port " + https_port);
@@ -258,22 +266,22 @@ public class HttpsServ implements Runnable {
                     boolean verbose, 
                     String DB_path, 
                     String PW_DB_path, 
+                    String DR_DB_path, 
                     String DB_username, 
                     String PW_DB_username, 
+                    String DR_DB_username, 
                     String DB_password, 
                     String PW_DB_password, 
+                    String DR_DB_password, 
                     String DB_port, 
                     String PW_DB_port, 
-                    String ut_, 
-                    String ft_, 
-                    String pw_, 
+                    String DR_DB_port, 
                     String DB,
-                    String PW_DB) throws PropertyVetoException {
+                    String PW_DB,
+                    String DR_DB,
+                    String k) throws PropertyVetoException {
         this.listening_port = listening_port;
         this.verbose = verbose;
-        this.ut = ut_;
-        this.ft = ft_;
-        this.pt = pw_;
         //this.threadPool = Executors.newFixedThreadPool(10);
         this.threadPool = Executors.newCachedThreadPool(); // See how that worls with memory requirements
         this.inter_thread_store = LiveData.LiveData(); // Generate an instance of the singleton LiveData
@@ -301,12 +309,28 @@ public class HttpsServ implements Runnable {
         } catch (NoSuchPaddingException ex) {
             Logger.getLogger(HttpsServ.class.getName()).log(Level.SEVERE, null, ex);
         }
-
-        // Very new: utilize ENA DB Components instead of ComboPooledDataSources
-        int db_port = Integer.parseInt(DB_port);
-        this.cpd = new EnaDBComponents(type.MySQL, DB_path, db_port, DB, DB_username, DB_password);
-        int pw_db_port = Integer.parseInt(DB_port);
-        this.pwd = new EnaDBComponents(type.MySQL, PW_DB_path, pw_db_port, PW_DB, PW_DB_username, PW_DB_password);
+        
+        this.the_cache = new memCache(DB_path, 
+                                      DB_port, 
+                                      DB_username, 
+                                      DB_password,  
+                                      DB,
+                                      PW_DB_path, 
+                                      PW_DB_port, 
+                                      PW_DB_username, 
+                                      PW_DB_password,   
+                                      PW_DB,
+                                      null, 
+                                      null, 
+                                      null, 
+                                      null, 
+                                      null,
+                                      DR_DB_path, 
+                                      DR_DB_port, 
+                                      DR_DB_username, 
+                                      DR_DB_password, 
+                                      DR_DB,
+                                      k); // Key used by external SQL source for encryption
     }
 
     //this is a overridden method from the Thread class we extended from
@@ -349,7 +373,7 @@ public class HttpsServ implements Runnable {
                 } catch (IOException e) {
                     throw new RuntimeException("Error accepting client connection", e);
                 }
-                this.threadPool.execute(new HttpsHandler_Alternative(connectionsocket, this.verbose, this.inter_thread_store, this, this.ut, this.ft, this.pt));
+                this.threadPool.execute(new HttpsHandler_Alternative(connectionsocket, this.verbose, this.inter_thread_store, this));
             }
 
         } catch (IOException ex) {
@@ -366,13 +390,8 @@ public class HttpsServ implements Runnable {
             Logger.getLogger(HttpsServ.class.getName()).log(Level.SEVERE, null, ex);
         }
     }
-
-    Connection getAConn() throws SQLException {
-        //return this.cpds.getConnection();
-        return this.cpd.getAConnection();
-    }
-    public Connection getAPWConn() throws SQLException {
-        //return this.pwds.getConnection();
-        return this.pwd.getAConnection();
+    
+    public memCache getCache() {
+        return this.the_cache;
     }
 }
